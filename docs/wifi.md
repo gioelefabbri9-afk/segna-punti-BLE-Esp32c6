@@ -76,6 +76,8 @@ polling, ogni tasto parte appena premuto.
 - **Comando**: parte subito e viene ripetuto ogni 100 ms finché arriva il suo ACK.
   Scade, come prima, tre secondi dopo essere arrivato in testa alla coda (buzzer
   d'errore, una nuova pressione crea un nuovo comando).
+- `GET /api/status` contiene `"push":1`: un controller che parla push non deve
+  chiamare `POST /api/session`, altrimenti il canale push aspetta 10 secondi.
 - Un solo controller alla volta, HTTP o push: mentre un tabellone HTTP tiene la
   sessione le risposte push sono ignorate, e viceversa `POST /api/session` dà 409.
 

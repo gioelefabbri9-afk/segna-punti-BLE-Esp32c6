@@ -66,8 +66,11 @@ static esp_err_t config_post(httpd_req_t *req)
 static esp_err_t status_get(httpd_req_t *req)
 {
     char json[160];
-    snprintf(json, sizeof(json), "{\"ssid\":\"Playmaker Wi-Fi\",\"controllerConnected\":%s,\"batteryMv\":%u,\"protocol\":%u}",
-             wifi_link_is_connected() ? "true" : "false", power_manager_battery_mv(), WEARABLE_PROTOCOL_VERSION);
+    /* "push": this firmware sends commands by itself (UDP, docs/wifi.md); a controller
+     * that understands it must not take the HTTP session, or the push link waits 10 s. */
+    snprintf(json, sizeof(json), "{\"ssid\":\"Playmaker Wi-Fi\",\"controllerConnected\":%s,\"batteryMv\":%u,\"protocol\":%u,\"push\":%u}",
+             wifi_link_is_connected() ? "true" : "false", power_manager_battery_mv(), WEARABLE_PROTOCOL_VERSION,
+             WIFI_LINK_PUSH_VERSION);
     httpd_resp_set_type(req, "application/json");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
     return httpd_resp_sendstr(req, json);
