@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "esp_attr.h"
 #include "esp_event.h"
 #include "esp_log.h"
 #include "esp_mac.h"
@@ -111,10 +112,37 @@ static bool save(const credentials_t *credentials)
     return err == ESP_OK;
 }
 
+/*
+ * One radio serves both the AP and the station. Every background attempt to
+ * find a LAN scans all channels, and while it does the AP is off its own
+ * channel: a controller that joined the AP directly sees seconds of silence and
+ * button commands expire. Measured with no known LAN in range: about 20 s of
+ * dropouts (up to 3.3 s each) in every 50 s cycle, 14 of 150 presses lost.
+ * So background retries wait while a client is associated to the AP. A network
+ * submitted from the settings page is still tried at once.
+ */
+#define AP_FIRST_MS 5000
+/* Survives deep sleep: was the AP in use the last time we were awake? */
+static RTC_DATA_ATTR bool s_ap_was_used;
+
+static bool ap_in_use(void)
+{
+    wifi_sta_list_t clients;
+    return esp_wifi_ap_get_sta_list(&clients) == ESP_OK && clients.num > 0;
+}
+
 static void network_task(void *arg)
 {
     (void)arg;
     bool have_request = false;
+    /*
+     * A button woke us and last time the controller was on the AP: let it join
+     * before the first LAN search, otherwise the wake-up press meets a deaf AP.
+     * Devices used over a LAN (flag clear) start the search at once, as before.
+     */
+    for (unsigned waited = 0; s_ap_was_used && waited < AP_FIRST_MS && !ap_in_use(); waited += 250) {
+        vTaskDelay(pdMS_TO_TICKS(250));
+    }
     for (;;) {
         bool connected;
         portENTER_CRITICAL(&s_state_lock);
@@ -132,12 +160,14 @@ static void network_task(void *arg)
                 connected = false;
             }
         }
-        if (!connected) {
+        s_ap_was_used = ap_in_use();
+        if (!connected && !s_ap_was_used) {
             bool ok = s_saved.ssid[0] && connect_to(&s_saved);
             if (!ok) ok = connect_to(&FALLBACK);
             message(ok ? "Connesso alla LAN" : "Rete non disponibile. Configura il Wi-Fi dall'AP e riprova.");
         }
-        /* Wake quickly on a submitted network, retry unavailable networks every 30s. */
+        /* Wake quickly on a submitted network, retry unavailable networks every 30s
+         * (and re-check every 30s whether the AP is still in use). */
         have_request = xQueueReceive(s_requests, &s_attempt, pdMS_TO_TICKS(30000)) == pdTRUE;
     }
 }

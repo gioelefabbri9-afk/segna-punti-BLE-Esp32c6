@@ -29,6 +29,13 @@ aprire finestre di pairing o cancellare credenziali Bluetooth.
 - Se nessuna rete è raggiungibile, il firmware riprova ogni 30 secondi; l'AP
   consente sempre di scegliere una nuova rete.
 - Reti enterprise con nome utente/certificati e captive portal non sono supportate.
+- Finché un dispositivo è collegato all'AP (tabellone in modalità diretta) la
+  ricerca periodica della LAN è sospesa: la radio è una sola e ogni ricerca
+  toglie l'AP dal suo canale per alcuni secondi, facendo scadere i comandi.
+  Riprende entro 30 secondi da quando l'AP resta libero. Una rete inviata dalla
+  pagina di configurazione viene comunque provata subito.
+- Al risveglio, se l'ultima volta l'AP era in uso, la prima ricerca LAN attende
+  fino a 5 secondi che il tabellone si ricolleghi all'AP.
 
 L'indirizzo LAN dipende dal DHCP del router. È visibile nella configurazione e nel
 log USB (`LAN ready: http://.../`). AP e LAN condividono le stesse pagine e API.
