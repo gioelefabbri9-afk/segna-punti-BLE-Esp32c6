@@ -1,6 +1,7 @@
 #include "wearable_app.h"
 
 #include "wifi_link.h"
+#include "wifi_network.h"
 #include "board_io.h"
 #include "button_manager.h"
 #include "config_store.h"
@@ -119,6 +120,7 @@ static void on_primitive(wearable_token_t token, void *ctx)
         return;
     }
 
+    wifi_network_kick();
     gesture_engine_feed(token);
 }
 

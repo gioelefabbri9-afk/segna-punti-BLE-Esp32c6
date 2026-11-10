@@ -107,5 +107,7 @@ esp_err_t config_ap_start(void)
     if (err != ESP_OK) return err;
     err = wifi_link_register(server);
     if (err != ESP_OK) return err;
-    return playmaker_discovery_start();
+    err = playmaker_discovery_start();
+    if (err != ESP_OK) return err;
+    return udp_link_start();
 }

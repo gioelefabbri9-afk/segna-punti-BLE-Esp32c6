@@ -27,10 +27,18 @@ static void *s_ctx;
 static wearable_ack_packet_t s_last_ack;
 static bool s_have_ack;
 
+/* Push transport: see wifi_link.h. */
+#define PUSH_OWNER "udp"            /* never a valid HTTP client id (32 hex digits) */
+#define PUSH_LEASE_US 3000000LL     /* three heartbeats without an answer */
+#define PUSH_RESEND_US 100000LL
+#define PUSH_BEAT_US 1000000LL
+static int64_t s_push_next_us, s_beat_next_us;
+
 static void pop_head(void)
 {
     s_head = (s_head + 1) % QUEUE_SIZE;
     s_count--;
+    s_push_next_us = 0;
     if (s_count) action_retry_start(&s_queue[s_head].retry, esp_timer_get_time());
 }
 
@@ -57,9 +65,14 @@ static void retry_task(void *arg)
     }
 }
 
+static bool push_owner(void)
+{
+    return !strcmp(s_owner, PUSH_OWNER);
+}
+
 static bool active(void)
 {
-    return s_owner[0] && esp_timer_get_time() - s_seen < LEASE_US;
+    return s_owner[0] && esp_timer_get_time() - s_seen < (push_owner() ? PUSH_LEASE_US : LEASE_US);
 }
 
 bool wifi_link_is_connected(void)
@@ -142,6 +155,30 @@ static esp_err_t action_get(httpd_req_t *req)
     return httpd_resp_send(req, (const char *)packet, size);
 }
 
+/* Shared by both transports. false = that command already expired. */
+static bool take_ack(const wearable_ack_packet_t *ack)
+{
+    bool accepted = false, notify = false;
+    wearable_action_t action = WEARABLE_ACTION_POINT_A;
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    if (s_count && !action_retry_expired(&s_queue[s_head].retry, esp_timer_get_time()) &&
+        ack->session_id == s_queue[s_head].packet.session_id && ack->sequence == s_queue[s_head].packet.sequence) {
+        accepted = true;
+        if (ack->status != WEARABLE_ACK_TEMPORARY_ERROR) {
+            action = s_queue[s_head].packet.action;
+            pop_head();
+            s_last_ack = *ack;
+            s_have_ack = true;
+            notify = true;
+        }
+    } else if (s_have_ack && ack->session_id == s_last_ack.session_id && ack->sequence == s_last_ack.sequence) {
+        accepted = true;
+    }
+    xSemaphoreGive(s_lock);
+    if (notify && s_ack_cb) s_ack_cb(action, ack, s_ctx);
+    return accepted;
+}
+
 static esp_err_t ack_post(httpd_req_t *req)
 {
     if (!authorize(req, false)) return ESP_OK;
@@ -155,28 +192,10 @@ static esp_err_t ack_post(httpd_req_t *req)
     }
     wearable_ack_packet_t ack;
     if (!wearable_decode_ack(bytes, sizeof(bytes), &ack)) return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "ACK invalido");
-    bool accepted = false, notify = false;
-    wearable_action_t action = WEARABLE_ACTION_POINT_A;
-    xSemaphoreTake(s_lock, portMAX_DELAY);
-    if (s_count && !action_retry_expired(&s_queue[s_head].retry, esp_timer_get_time()) &&
-        ack.session_id == s_queue[s_head].packet.session_id && ack.sequence == s_queue[s_head].packet.sequence) {
-        accepted = true;
-        if (ack.status != WEARABLE_ACK_TEMPORARY_ERROR) {
-            action = s_queue[s_head].packet.action;
-            pop_head();
-            s_last_ack = ack;
-            s_have_ack = true;
-            notify = true;
-        }
-    } else if (s_have_ack && ack.session_id == s_last_ack.session_id && ack.sequence == s_last_ack.sequence) {
-        accepted = true;
-    }
-    xSemaphoreGive(s_lock);
-    if (!accepted) {
+    if (!take_ack(&ack)) {
         httpd_resp_set_status(req, "410 Gone");
         return httpd_resp_sendstr(req, "Comando scaduto: nessun ulteriore tentativo");
     }
-    if (notify && s_ack_cb) s_ack_cb(action, &ack, s_ctx);
     httpd_resp_set_status(req, "204 No Content");
     return httpd_resp_send(req, NULL, 0);
 }
@@ -203,7 +222,10 @@ bool wifi_link_send_action(wearable_action_t action)
         s_queue[(s_head + s_count) % QUEUE_SIZE] = (queued_action_t){
             .packet = {.session_id = s_session, .sequence = s_sequence++, .action = action},
         };
-        if (!s_count) action_retry_start(&s_queue[s_head].retry, esp_timer_get_time());
+        if (!s_count) {
+            action_retry_start(&s_queue[s_head].retry, esp_timer_get_time());
+            s_push_next_us = 0;
+        }
         s_count++;
     }
     xSemaphoreGive(s_lock);
@@ -222,4 +244,75 @@ esp_err_t wifi_link_register(httpd_handle_t server)
         if (err != ESP_OK) return err;
     }
     return ESP_OK;
+}
+
+static void put32(uint8_t *out, uint32_t value)
+{
+    out[0] = (uint8_t)value; out[1] = (uint8_t)(value >> 8);
+    out[2] = (uint8_t)(value >> 16); out[3] = (uint8_t)(value >> 24);
+}
+
+size_t wifi_link_push_output(uint8_t *out, size_t capacity, const uint8_t device[6],
+                             uint16_t battery_mv, bool *to_everyone)
+{
+    if (capacity < WIFI_LINK_PUSH_MAX) return 0;
+    uint8_t type = 0;
+    size_t size = WIFI_LINK_PUSH_HEADER;
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    const int64_t now = esp_timer_get_time();
+    const bool pushing = active() && push_owner();
+    /* The head command goes out at once and again every 100 ms until its ACK
+     * (or until it expires, three seconds after reaching the head). */
+    if (pushing && s_count && !action_retry_expired(&s_queue[s_head].retry, now) && now >= s_push_next_us) {
+        size_t n = wearable_encode_action(&s_queue[s_head].packet, out + WIFI_LINK_PUSH_HEADER,
+                                          capacity - WIFI_LINK_PUSH_HEADER);
+        if (n) {
+            type = 'A';
+            size += n;
+            s_push_next_us = now + PUSH_RESEND_US;
+        }
+    }
+    /* Otherwise one heartbeat a second: it finds the controller and keeps the lease. */
+    if (!type && now >= s_beat_next_us) type = 'H';
+    if (type) s_beat_next_us = now + PUSH_BEAT_US;
+    const uint32_t session = s_session;
+    /* Lets the controller learn that a command it confirmed had already expired here. */
+    const uint32_t confirmed = s_have_ack && s_last_ack.session_id == s_session ? s_last_ack.sequence : 0;
+    xSemaphoreGive(s_lock);
+    if (!type) return 0;
+    out[0] = 'P'; out[1] = 'M'; out[2] = WIFI_LINK_PUSH_VERSION; out[3] = type;
+    memcpy(out + 4, device, 6);
+    put32(out + 10, session);
+    put32(out + 14, confirmed);
+    out[18] = (uint8_t)battery_mv; out[19] = (uint8_t)(battery_mv >> 8);
+    *to_everyone = !pushing;
+    return size;
+}
+
+bool wifi_link_push_input(const uint8_t *in, size_t len, bool same_peer)
+{
+    if (len < 4 || in[0] != 'P' || in[1] != 'M' || in[2] != WIFI_LINK_PUSH_VERSION) return false;
+    wearable_ack_packet_t ack;
+    bool has_ack = false;
+    if (in[3] == 'a') {
+        if (!wearable_decode_ack(in + 4, len - 4, &ack)) return false;
+        has_ack = true;
+    } else if (in[3] != 'h' || len != 4) {
+        return false;
+    }
+    bool ok;
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    if (active()) {
+        /* One controller at a time, whichever transport it uses. */
+        ok = push_owner() && same_peer;
+    } else {
+        /* A new controller must never receive commands from an expired lease. */
+        s_head = s_count = 0;
+        strlcpy(s_owner, PUSH_OWNER, sizeof(s_owner));
+        ok = true;
+    }
+    if (ok) s_seen = esp_timer_get_time();
+    xSemaphoreGive(s_lock);
+    if (ok && has_ack) take_ack(&ack);
+    return ok;
 }

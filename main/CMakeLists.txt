@@ -13,6 +13,7 @@ idf_component_register(
         "power/sleep_manager.c"
         "link/wearable_protocol.c"
         "link/wifi_link.c"
+        "link/udp_link.c"
         "link/wifi_network.c"
         "web/config_ap.c"
         "../shared/discovery/playmaker_discovery.c"

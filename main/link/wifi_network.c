@@ -125,6 +125,26 @@ static bool save(const credentials_t *credentials)
 /* Survives deep sleep: was the AP in use the last time we were awake? */
 static RTC_DATA_ATTR bool s_ap_was_used;
 
+/* Seconds between LAN searches while it is down: at once, then 2, 4, 8, 16 and
+ * every 16 from there. A button press restarts the ladder. */
+static const uint16_t BACKOFF_MS[] = {0, 2000, 4000, 8000, 16000};
+#define BACKOFF_STEPS (sizeof(BACKOFF_MS) / sizeof(BACKOFF_MS[0]))
+#define AP_RECHECK_MS 2000
+static volatile bool s_kick;
+
+void wifi_network_kick(void)
+{
+    s_kick = true;
+}
+
+static bool lan_up(void)
+{
+    portENTER_CRITICAL(&s_state_lock);
+    bool up = s_connected;
+    portEXIT_CRITICAL(&s_state_lock);
+    return up;
+}
+
 static bool ap_in_use(void)
 {
     wifi_sta_list_t clients;
@@ -135,6 +155,7 @@ static void network_task(void *arg)
 {
     (void)arg;
     bool have_request = false;
+    unsigned step = 0;
     /*
      * A button woke us and last time the controller was on the AP: let it join
      * before the first LAN search, otherwise the wake-up press meets a deaf AP.
@@ -162,13 +183,24 @@ static void network_task(void *arg)
         }
         s_ap_was_used = ap_in_use();
         if (!connected && !s_ap_was_used) {
-            bool ok = s_saved.ssid[0] && connect_to(&s_saved);
-            if (!ok) ok = connect_to(&FALLBACK);
-            message(ok ? "Connesso alla LAN" : "Rete non disponibile. Configura il Wi-Fi dall'AP e riprova.");
+            connected = s_saved.ssid[0] && connect_to(&s_saved);
+            if (!connected) connected = connect_to(&FALLBACK);
+            message(connected ? "Connesso alla LAN" : "Rete non disponibile. Configura il Wi-Fi dall'AP e riprova.");
+            if (step < BACKOFF_STEPS - 1) step++;
         }
-        /* Wake quickly on a submitted network, retry unavailable networks every 30s
-         * (and re-check every 30s whether the AP is still in use). */
-        have_request = xQueueReceive(s_requests, &s_attempt, pdMS_TO_TICKS(30000)) == pdTRUE;
+        if (connected) step = 0;
+        /*
+         * Connected: nothing to retry, just notice the drop and search again at
+         * once. Down: wait the next rung of the ladder (or, while the AP is in
+         * use, a short re-check). A submitted network always wakes us at once.
+         */
+        const unsigned wait_ms = !connected && s_ap_was_used ? AP_RECHECK_MS : BACKOFF_MS[step];
+        have_request = false;
+        s_kick = false;
+        for (unsigned waited = 0; connected || waited < wait_ms; waited += 250) {
+            if (xQueueReceive(s_requests, &s_attempt, pdMS_TO_TICKS(250)) == pdTRUE) { have_request = true; break; }
+            if (connected ? !lan_up() : s_kick) { step = 0; break; }
+        }
     }
 }
 

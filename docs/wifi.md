@@ -61,6 +61,53 @@ in `ble-protocol.md`, ora trasportato su HTTP.
 - `POST /api/network`: SSID NUL-terminated di 33 byte + password di 65 byte.
 - `GET/POST /api/config`: timing, gesture e suoni (protocollo binario esistente).
 
+### Canale push (UDP) — per il mini PC
+
+Le rotte HTTP qui sopra restano per la pagina nel browser e per il ricevitore USB.
+Il mini PC usa invece un canale dove è il wearable a parlare per primo: niente
+polling, ogni tasto parte appena premuto.
+
+- Porta UDP **37021** sul controller. Il wearable non fa `bind`: il controller
+  risponde all'indirizzo e alla porta da cui arriva il datagramma.
+- **Heartbeat** ogni secondo. Finché nessun controller risponde va in broadcast
+  su tutte le reti in cui il wearable si trova (il suo AP e la LAN); poi va dritto
+  al controller che ha risposto. Tre secondi senza risposte = controller perso,
+  si torna al broadcast. Il controller non deve conoscere l'indirizzo del wearable.
+- **Comando**: parte subito e viene ripetuto ogni 100 ms finché arriva il suo ACK.
+  Scade, come prima, tre secondi dopo essere arrivato in testa alla coda (buzzer
+  d'errore, una nuova pressione crea un nuovo comando).
+- Un solo controller alla volta, HTTP o push: mentre un tabellone HTTP tiene la
+  sessione le risposte push sono ignorate, e viceversa `POST /api/session` dà 409.
+
+Datagrammi, interi little-endian:
+
+| Verso | Byte | Contenuto |
+|---|---|---|
+| wearable → controller | 0-1 | `"PM"` |
+| | 2 | versione del canale = 1 |
+| | 3 | `'H'` heartbeat, `'A'` comando |
+| | 4-9 | id del dispositivo (gli stessi 6 byte di `device_id` in `/api/network`) |
+| | 10-13 | `session_id` corrente |
+| | 14-17 | `sequence` dell'ultimo comando confermato in questa sessione (0 = nessuno) |
+| | 18-19 | batteria in mV (0 = non misurata) |
+| | 20-31 | solo `'A'`: pacchetto ACTION v6 (12 byte, `ble-protocol.md`) |
+| controller → wearable | 0-3 | `"PM"`, 1, `'h'` (risposta all'heartbeat) |
+| | 0-3 + 20 | `"PM"`, 1, `'a'` + pacchetto ACK v6 (20 byte) |
+
+Il campo 14-17 serve al controller per accorgersi che un comando che lui ha
+confermato era già scaduto sul wearable (ACK perso per tre secondi): in quel caso
+il punto va tolto, perché chi ha sentito l'errore ripreme.
+
+Il canale non è autenticato: chi sta nella stessa rete può fingersi wearable o
+controller, come già per le rotte HTTP.
+
+### Ricerca della LAN
+
+Senza LAN il wearable la cerca subito, poi dopo 2, 4, 8 e 16 secondi, poi ogni
+16. Una pressione di un tasto fa ripartire la scala da capo; persa la LAN la
+ricerca riparte subito. Da connesso non cerca nulla. Mentre un controller è
+agganciato all'AP la ricerca aspetta (la radio è una sola: cercando, l'AP tace).
+
 Un solo tabellone alla volta controlla il dispositivo. La sessione usa un ID
 casuale nell'header `X-Playmaker-Client`; dopo 10 secondi senza richieste un altro
 tabellone può collegarsi. Il polling avviene ogni 150 ms senza sovrapporre le
