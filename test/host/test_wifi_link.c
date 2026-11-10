@@ -41,30 +41,32 @@ int main(void)
 
     /* Push transport: heartbeat finds the controller, commands repeat until their ACK. */
     uint8_t out[WIFI_LINK_PUSH_MAX];
-    const uint8_t device[6]={1,2,3,4,5,6},beat_ack[4]={'P','M',1,'h'};
+    const uint8_t device[6]={1,2,3,4,5,6},beat_ack[8]={'P','M',2,'h',9,8,7,6};
     bool everyone=false;
     host_now_us=7000000;
-    assert(wifi_link_push_output(out,sizeof(out),device,3900,&everyone)==20 && out[3]=='H' && everyone);
+    assert(wifi_link_push_output(out,sizeof(out),device,3900,&everyone)==24 && out[3]=='H' && everyone);
+    assert(!out[20] && !out[23]);                                /* no token in a broadcast */
     assert(out[4]==1 && out[9]==6 && out[10]==123 && out[14]==4 && out[18]==(3900&0xff) && out[19]==(3900>>8));
-    assert(!wifi_link_push_input(beat_ack,4,false));              /* the HTTP controller still holds the lease */
+    assert(!wifi_link_push_input(beat_ack,8,false));              /* the HTTP controller still holds the lease */
     host_now_us=17000000;
-    assert(wifi_link_push_input(beat_ack,4,false) && wifi_link_is_connected());
+    assert(wifi_link_push_input(beat_ack,8,false) && wifi_link_is_connected());
     req=(httpd_req_t){.id=id};session_post(&req);assert(!strncmp(req.status,"409",3));
     assert(wifi_link_send_action(WEARABLE_ACTION_POINT_B));
-    assert(wifi_link_push_output(out,sizeof(out),device,3900,&everyone)==32 && out[3]=='A' && !everyone && out[26]==5);
+    assert(wifi_link_push_output(out,sizeof(out),device,3900,&everyone)==36 && out[3]=='A' && !everyone && out[30]==5);
+    assert(out[20]==9 && out[23]==6);                            /* the controller's token comes back */
     assert(wifi_link_push_output(out,sizeof(out),device,3900,&everyone)==0);   /* not before 100 ms */
     host_now_us+=100000;
-    assert(wifi_link_push_output(out,sizeof(out),device,3900,&everyone)==32 && out[26]==5);
-    uint8_t push_ack[24]={'P','M',1,'a',6,2,0,0};
-    push_ack[8]=123;push_ack[12]=5;
-    assert(wifi_link_push_input(push_ack,24,true) && acks==3 && s_count==0);
-    assert(wifi_link_push_input(push_ack,24,true) && acks==3);    /* a repeated ACK is harmless */
+    assert(wifi_link_push_output(out,sizeof(out),device,3900,&everyone)==36 && out[30]==5);
+    uint8_t push_ack[28]={'P','M',2,'a',1,1,1,1,6,2,0,0};        /* the controller may change its token */
+    push_ack[12]=123;push_ack[16]=5;
+    assert(wifi_link_push_input(push_ack,28,true) && acks==3 && s_count==0);
+    assert(wifi_link_push_input(push_ack,28,true) && acks==3);    /* a repeated ACK is harmless */
     host_now_us+=1000000;
-    assert(wifi_link_push_output(out,sizeof(out),device,3900,&everyone)==20 && out[3]=='H' && !everyone && out[14]==5);
-    assert(!wifi_link_push_input(beat_ack,4,false));              /* a second controller waits its turn */
-    push_ack[2]=9;assert(!wifi_link_push_input(push_ack,24,true));/* unknown version */
+    assert(wifi_link_push_output(out,sizeof(out),device,3900,&everyone)==24 && out[3]=='H' && !everyone && out[14]==5 && out[20]==1);
+    assert(!wifi_link_push_input(beat_ack,8,false));              /* a second controller waits its turn */
+    push_ack[2]=1;assert(!wifi_link_push_input(push_ack,28,true));/* unknown version */
     host_now_us+=3000001;
     assert(!wifi_link_is_connected() && !wifi_link_send_action(WEARABLE_ACTION_POINT_A));
-    assert(wifi_link_push_output(out,sizeof(out),device,3900,&everyone)==20 && everyone);
-    puts("Wi-Fi push link: discovery heartbeat, 100 ms repeats until ACK, one controller at a time, 3 s lease OK");
+    assert(wifi_link_push_output(out,sizeof(out),device,3900,&everyone)==24 && everyone && !out[20]);
+    puts("Wi-Fi push link: discovery heartbeat, token echo, 100 ms repeats until ACK, one controller at a time, 3 s lease OK");
 }

@@ -33,6 +33,10 @@ static bool s_have_ack;
 #define PUSH_RESEND_US 100000LL
 #define PUSH_BEAT_US 1000000LL
 static int64_t s_push_next_us, s_beat_next_us;
+/* The controller's token, echoed in every datagram sent straight to it: it proves the
+ * sender really receives what the controller sends to this address (a forged source
+ * address does not). Never broadcast. */
+static uint8_t s_push_token[4];
 
 static void pop_head(void)
 {
@@ -278,6 +282,8 @@ size_t wifi_link_push_output(uint8_t *out, size_t capacity, const uint8_t device
     const uint32_t session = s_session;
     /* Lets the controller learn that a command it confirmed had already expired here. */
     const uint32_t confirmed = s_have_ack && s_last_ack.session_id == s_session ? s_last_ack.sequence : 0;
+    memset(out + 20, 0, 4);
+    if (pushing) memcpy(out + 20, s_push_token, 4);
     xSemaphoreGive(s_lock);
     if (!type) return 0;
     out[0] = 'P'; out[1] = 'M'; out[2] = WIFI_LINK_PUSH_VERSION; out[3] = type;
@@ -291,13 +297,13 @@ size_t wifi_link_push_output(uint8_t *out, size_t capacity, const uint8_t device
 
 bool wifi_link_push_input(const uint8_t *in, size_t len, bool same_peer)
 {
-    if (len < 4 || in[0] != 'P' || in[1] != 'M' || in[2] != WIFI_LINK_PUSH_VERSION) return false;
+    if (len < WIFI_LINK_PUSH_REPLY || in[0] != 'P' || in[1] != 'M' || in[2] != WIFI_LINK_PUSH_VERSION) return false;
     wearable_ack_packet_t ack;
     bool has_ack = false;
     if (in[3] == 'a') {
-        if (!wearable_decode_ack(in + 4, len - 4, &ack)) return false;
+        if (!wearable_decode_ack(in + WIFI_LINK_PUSH_REPLY, len - WIFI_LINK_PUSH_REPLY, &ack)) return false;
         has_ack = true;
-    } else if (in[3] != 'h' || len != 4) {
+    } else if (in[3] != 'h' || len != WIFI_LINK_PUSH_REPLY) {
         return false;
     }
     bool ok;
@@ -311,7 +317,10 @@ bool wifi_link_push_input(const uint8_t *in, size_t len, bool same_peer)
         strlcpy(s_owner, PUSH_OWNER, sizeof(s_owner));
         ok = true;
     }
-    if (ok) s_seen = esp_timer_get_time();
+    if (ok) {
+        s_seen = esp_timer_get_time();
+        memcpy(s_push_token, in + 4, 4);
+    }
     xSemaphoreGive(s_lock);
     if (ok && has_ack) take_ack(&ack);
     return ok;

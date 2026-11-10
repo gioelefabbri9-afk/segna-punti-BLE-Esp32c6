@@ -72,11 +72,18 @@ polling, ogni tasto parte appena premuto.
 - **Heartbeat** ogni secondo. Finché nessun controller risponde va in broadcast
   su tutte le reti in cui il wearable si trova (il suo AP e la LAN); poi va dritto
   al controller che ha risposto. Tre secondi senza risposte = controller perso,
-  si torna al broadcast. Il controller non deve conoscere l'indirizzo del wearable.
+  si torna al broadcast. Il wearable non deve conoscere l'indirizzo del controller;
+  il mini PC risponde solo agli indirizzi che ha verificato lui (192.168.4.1 quando è
+  dentro l'AP del wearable, quello in LAN confermato da `/api/network`, o quello configurato).
 - **Comando**: parte subito e viene ripetuto ogni 100 ms finché arriva il suo ACK.
   Scade, come prima, tre secondi dopo essere arrivato in testa alla coda (buzzer
   d'errore, una nuova pressione crea un nuovo comando).
-- `GET /api/status` contiene `"push":1`: un controller che parla push non deve
+- **Gettone**: ogni risposta del controller porta 4 byte scelti da lui; il wearable
+  li rimanda in ogni datagramma diretto a quel controller (mai nei broadcast). Il
+  controller scarta i comandi senza il suo gettone e risponde col gettone: così un
+  pacchetto con l'indirizzo del wearable falsificato non segna punti, perché chi lo
+  manda non riceve le risposte. Non è cifratura: chi intercetta il traffico lo legge.
+- `GET /api/status` contiene `"push":2`: un controller che parla push non deve
   chiamare `POST /api/session`, altrimenti il canale push aspetta 10 secondi.
 - Un solo controller alla volta, HTTP o push: mentre un tabellone HTTP tiene la
   sessione le risposte push sono ignorate, e viceversa `POST /api/session` dà 409.
@@ -86,15 +93,17 @@ Datagrammi, interi little-endian:
 | Verso | Byte | Contenuto |
 |---|---|---|
 | wearable → controller | 0-1 | `"PM"` |
-| | 2 | versione del canale = 1 |
+| | 2 | versione del canale = 2 |
 | | 3 | `'H'` heartbeat, `'A'` comando |
 | | 4-9 | id del dispositivo (gli stessi 6 byte di `device_id` in `/api/network`) |
 | | 10-13 | `session_id` corrente |
 | | 14-17 | `sequence` dell'ultimo comando confermato in questa sessione (0 = nessuno) |
 | | 18-19 | batteria in mV (0 = non misurata) |
-| | 20-31 | solo `'A'`: pacchetto ACTION v6 (12 byte, `ble-protocol.md`) |
-| controller → wearable | 0-3 | `"PM"`, 1, `'h'` (risposta all'heartbeat) |
-| | 0-3 + 20 | `"PM"`, 1, `'a'` + pacchetto ACK v6 (20 byte) |
+| | 20-23 | gettone del controller (zero nei broadcast) |
+| | 24-35 | solo `'A'`: pacchetto ACTION v6 (12 byte, `ble-protocol.md`) |
+| controller → wearable | 0-3 | `"PM"`, 2, `'h'` (risposta all'heartbeat) oppure `'a'` |
+| | 4-7 | gettone del controller |
+| | 8-27 | solo `'a'`: pacchetto ACK v6 (20 byte) |
 
 Il campo 14-17 serve al controller per accorgersi che un comando che lui ha
 confermato era già scaduto sul wearable (ACK perso per tre secondi): in quel caso

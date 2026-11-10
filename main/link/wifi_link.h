@@ -18,8 +18,9 @@ bool wifi_link_is_connected(void);
  * time holds the wearable, whichever transport it uses.
  */
 #define WIFI_LINK_PUSH_PORT 37021
-#define WIFI_LINK_PUSH_VERSION 1u
-#define WIFI_LINK_PUSH_HEADER 20u
+#define WIFI_LINK_PUSH_VERSION 2u
+#define WIFI_LINK_PUSH_HEADER 24u
+#define WIFI_LINK_PUSH_REPLY 8u /* "PM", version, type, token */
 #define WIFI_LINK_PUSH_MAX (WIFI_LINK_PUSH_HEADER + WEARABLE_ACTION_PACKET_SIZE)
 /* The datagram to send now (0 = nothing). to_everyone: no push controller yet, broadcast it. */
 size_t wifi_link_push_output(uint8_t *out, size_t capacity, const uint8_t device[6],
